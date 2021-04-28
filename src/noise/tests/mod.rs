@@ -120,8 +120,8 @@ mod tests {
         ipv4_header[8] = 64; // TTL
         ipv4_header[9] = 1; // ICMP
 
-        ipv4_header[12..16].copy_from_slice(&0xC0A80202u32.to_be_bytes()); // src ip = 192.168.2.2
-        ipv4_header[16..20].copy_from_slice(&(0xC0A80200u32 + ip as u32).to_be_bytes()); // dst ip = 192.168.2.ip
+        ipv4_header[12..16].copy_from_slice(&(0xC0_A8_02_02u32).to_be_bytes()); // src ip = 192.168.2.2
+        ipv4_header[16..20].copy_from_slice(&(0xC0_A8_02_00u32 + ip as u32).to_be_bytes()); // dst ip = 192.168.2.ip
 
         let checksum = ipv4_checksum(&ipv4_header);
         write_u16_be(checksum, &mut ipv4_header[10..]);
@@ -137,6 +137,10 @@ mod tests {
         // Compute the checksum of the icmp header + payload
         let icmp_checksum = ipv4_checksum(&packet[20..]);
         write_u16_be(icmp_checksum, &mut packet[20 + 2..]);
+        
+        println!("iface_socket_return send {:?} {:?} ",socket.local_addr(), packet);
+        // println!("write ping from {:?} {:?} ",socket.local_addr(), packet);
+        
         socket.send(&packet).unwrap();
     }
 
@@ -163,6 +167,14 @@ mod tests {
         packet
     }
 
+//  __          __   _____     _______                _       _____                       
+//  \ \        / /  / ____|   |__   __|              | |     |  __ \                      
+//   \ \  /\  / /  | |  __       | |      ___   ___  | |_    | |__) |   ___    ___   _ __ 
+//    \ \/  \/ /   | | |_ |      | |     / _ \ / __| | __|   |  ___/   / _ \  / _ \ | '__|
+//     \  /\  /    | |__| |      | |    |  __/ \__ \ | |_    | |      |  __/ |  __/ | |   
+//      \/  \/      \_____|      |_|     \___| |___/  \__|   |_|       \___|  \___| |_|   
+                                                                                       
+                                                                                       
     // Start a WireGuard peer
     fn wireguard_test_peer(
         network_socket: UdpSocket,
@@ -188,6 +200,8 @@ mod tests {
         let peer: Arc<Box<Tunn>> = Arc::from(peer);
 
         let (iface_socket_ret, iface_socket) = connected_sock_pair();
+        println!("iface_socket_ret {:?}",iface_socket_ret.local_addr());
+        println!("iface_socket {:?}", iface_socket.local_addr());
 
         network_socket
             .set_read_timeout(Some(Duration::from_millis(1000)))
@@ -213,13 +227,19 @@ mod tests {
 
                 let n = match network_socket.recv(&mut recv_buf) {
                     Ok(n) => n,
-                    Err(_) => {
+                    Err(e) => {
+                        // println!("ERROR: listens on the network: {}", e);
                         if close.load(Ordering::Relaxed) {
                             return;
                         }
                         continue;
                     }
                 };
+
+                println!("recv network_socket");
+                let mut temp_recv: [u8; 150] = [0u8;150];
+                temp_recv.copy_from_slice(&recv_buf[0..150]);
+                println!("     network_socket recv: {:?}", temp_recv);
 
                 match peer.decapsulate(None, &recv_buf[..n], &mut send_buf) {
                     TunnResult::WriteToNetwork(packet) => {
@@ -229,25 +249,43 @@ mod tests {
                             let mut send_buf = [0u8; MAX_PACKET];
                             match peer.decapsulate(None, &[], &mut send_buf) {
                                 TunnResult::WriteToNetwork(packet) => {
+                                    println!("Inner decapsulate WriteToNetwork");
+                                    let mut temp_recv  = [0u8;69];
+                                    temp_recv.copy_from_slice(&packet[0..69]);
+                                    println!("      {:?}", temp_recv);
+                                    println!("");
                                     network_socket.send(packet).unwrap();
                                 }
-                                _ => {
+                                x => {
+                                    println!("Inner decapsulate");
+                                    println!("{:?}",x);
+                                    println!("");
                                     break;
                                 }
                             }
                         }
                     }
                     TunnResult::WriteToTunnelV4(packet, _) => {
+                        println!("Outer decapsulate WriteToTunnelV4");
+                        println!("       {:?}", packet);
                         iface_socket.send(packet).unwrap();
                     }
                     TunnResult::WriteToTunnelV6(packet, _) => {
+                        println!("Outer decapsulate WriteToTunnelV6");
                         iface_socket.send(packet).unwrap();
                     }
-                    _ => {}
+                    x => {
+                        println!("Outer decapsulate Other");
+                        println!("      {:?}",x);
+                    }
                 }
             });
         }
 
+
+
+        // 2) listens on the iface for raw packets and encapsulates them
+        // i.e. SEND OUT TO NETWORK 
         {
             let network_socket = network_socket.try_clone().unwrap();
             let iface_socket = iface_socket.try_clone().unwrap();
@@ -260,7 +298,8 @@ mod tests {
 
                 let n = match iface_socket.recv(&mut recv_buf) {
                     Ok(n) => n,
-                    Err(_) => {
+                    Err(e) => {
+                        // println!("ERROR: listens on the iface: {}", e);
                         if close.load(Ordering::Relaxed) {
                             return;
                         }
@@ -268,11 +307,20 @@ mod tests {
                     }
                 };
 
+                println!("Pre - Encapsulate WriteToNetwork");
+                let mut temp_recv: [u8; 37] = [0u8;37];
+                temp_recv.copy_from_slice(&recv_buf[0..37]);
+                println!("     iface_socket recv: {:?}", temp_recv);
                 match peer.encapsulate(&recv_buf[..n], &mut send_buf) {
                     TunnResult::WriteToNetwork(packet) => {
+                        println!("Encapsulate WriteToNetwork");
+                        println!("       {:?}", packet);
                         network_socket.send(packet).unwrap();
                     }
-                    _ => {}
+                    x => {
+                        println!("Encapsulate other");
+                        println!("       {:?}", x);
+                    }
                 }
             });
         }
@@ -285,9 +333,14 @@ mod tests {
             let mut send_buf = [0u8; MAX_PACKET];
             match peer.update_timers(&mut send_buf) {
                 TunnResult::WriteToNetwork(packet) => {
+                    // println!("UpdateTimers WriteToNetwork");
                     network_socket.send(packet).unwrap();
                 }
-                _ => {}
+                x => {
+                    // println!("UpdateTimers other");
+                    // println!("       {:?}", x);
+                }
+                // _ => {}
             }
 
             thread::sleep(Duration::from_millis(200));
@@ -296,6 +349,8 @@ mod tests {
         iface_socket_ret
     }
 
+
+
     fn connected_sock_pair() -> (UdpSocket, UdpSocket) {
         let addr_a = format!("localhost:{}", NEXT_PORT.next());
         let addr_b = format!("localhost:{}", NEXT_PORT.next());
@@ -303,6 +358,7 @@ mod tests {
         let sock_b = UdpSocket::bind(&addr_b).unwrap();
         sock_a.connect(&addr_b).unwrap();
         sock_b.connect(&addr_a).unwrap();
+        // println!("Connected Socket Pair {:?} {:?}", sock_a.local_addr(), sock_b.local_addr());
         (sock_a, sock_b)
     }
 
@@ -335,42 +391,6 @@ mod tests {
         );
 
         (s_iface, c_iface, close)
-    }
-
-    #[test]
-    fn wireguard_handshake() {
-        // Test the connection is successfully established and some packets are passed around
-        {
-            let (peer_iface_socket_sender, client_iface_socket_sender, close) =
-                wireguard_test_pair();
-
-            client_iface_socket_sender
-                .set_read_timeout(Some(Duration::from_millis(1000)))
-                .unwrap();
-            client_iface_socket_sender
-                .set_write_timeout(Some(Duration::from_millis(1000)))
-                .unwrap();
-
-            thread::spawn(move || loop {
-                let data = read_ipv4_packet(&peer_iface_socket_sender);
-                let data_string = str::from_utf8(&data).unwrap().to_uppercase().into_bytes();
-                write_ipv4_packet(&peer_iface_socket_sender, &data_string);
-            });
-
-            for _i in 0..64 {
-                write_ipv4_packet(&client_iface_socket_sender, b"test");
-                let response = read_ipv4_packet(&client_iface_socket_sender);
-                assert_eq!(&response, b"TEST");
-            }
-
-            for _i in 0..64 {
-                write_ipv4_packet(&client_iface_socket_sender, b"check");
-                let response = read_ipv4_packet(&client_iface_socket_sender);
-                assert_eq!(&response, b"CHECK");
-            }
-
-            close.store(true, Ordering::Relaxed);
-        }
     }
 
     struct WireGuardExt {
@@ -436,18 +456,21 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn wireguard_interop() {
         // Test the connection with wireguard-go is successfully established
         // and we are getting ping from server
         let c_key_pair = key_pair();
-        let itr = 1000;
+        let itr = 4;
         let endpoint = NEXT_PORT.next() as u16;
         let wg = WireGuardExt::start(endpoint, &c_key_pair.1);
         let c_addr = format!("localhost:{}", endpoint);
         let w_addr = format!("localhost:{}", wg.port);
+        println!("Server Lives on {}",w_addr);
+        println!("Client Lives on {}",c_addr);
+
         let client_socket =
             UdpSocket::bind(&c_addr).unwrap_or_else(|e| panic!("UdpSocket {}: {}", c_addr, e));
+
         client_socket
             .connect(&w_addr)
             .unwrap_or_else(|e| panic!("connect {}: {}", w_addr, e));
@@ -463,68 +486,24 @@ mod tests {
         );
 
         c_iface
-            .set_read_timeout(Some(Duration::from_millis(1000)))
+            .set_read_timeout(Some(Duration::from_millis(10000)))
             .unwrap();
 
         for i in 0..itr {
+
             write_ipv4_ping(&c_iface, b"test_ping", i as u16, wg.ip);
-            assert_eq!(read_ipv4_ping(&c_iface, i as u16), b"test_ping",);
-            thread::sleep(Duration::from_millis(30));
+            // assert_eq!(read_ipv4_ping(&c_iface, i as u16), b"test_ping",);
+            let response = read_ipv4_ping(&c_iface, i as u16);
+            println!("RESPONSE : {:?}",response);
+            println!("------------------------------");
+            println!("");
+            println!("");
+            println!("");
+
+            thread::sleep(Duration::from_millis(5000));
         }
 
         close.store(true, Ordering::Relaxed);
     }
 
-    #[test]
-    #[ignore]
-    fn wireguard_receiver() {
-        // Test the connection with wireguard-go is successfully established
-        // when go is the initiator
-        let c_key_pair = key_pair();
-        let itr = 1000;
-
-        let endpoint = NEXT_PORT.next() as u16;
-        let wg = WireGuardExt::start(endpoint, &c_key_pair.1);
-        let c_addr = format!("localhost:{}", endpoint);
-        let w_addr = format!("localhost:{}", wg.port);
-        let client_socket = UdpSocket::bind(c_addr).unwrap();
-        client_socket.connect(w_addr).unwrap();
-
-        let close = Arc::new(AtomicBool::new(false));
-
-        let c_iface = wireguard_test_peer(
-            client_socket,
-            &c_key_pair.0,
-            &wg.public_key,
-            Box::new(|e: &str| eprintln!("client: {}", e)),
-            close.clone(),
-        );
-
-        c_iface
-            .set_read_timeout(Some(Duration::from_millis(1000)))
-            .unwrap();
-
-        let t_addr = format!("192.168.2.{}:{}", wg.ip, NEXT_PORT.next());
-        let test_socket = UdpSocket::bind(t_addr).unwrap();
-        test_socket.connect("192.168.2.2:30000").unwrap();
-
-        thread::spawn(move || {
-            for i in 0..itr {
-                test_socket
-                    .send(format!("This is a test message {}", i).as_bytes())
-                    .unwrap();
-                thread::sleep(Duration::from_millis(10));
-            }
-        });
-
-        let mut src = [0u8; MAX_PACKET];
-
-        for i in 0..itr {
-            let m = c_iface.recv(&mut src).unwrap();
-            assert_eq!(
-                &src[28..m], // Strip ip and udp headers
-                format!("This is a test message {}", i).as_bytes()
-            );
-        }
-    }
 }
